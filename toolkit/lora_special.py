@@ -59,6 +59,7 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             module_dropout=None,
             network: 'LoRASpecialNetwork' = None,
             use_bias: bool = False,
+            is_ara: bool = False,
             **kwargs
     ):
         self.can_merge_in = True
@@ -68,6 +69,10 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         self.lora_name = lora_name
         self.orig_module_ref = weakref.ref(org_module)
         self.scalar = torch.tensor(1.0, device=org_module.weight.device)
+        
+        # if is ara lora module, mark it on the layer so memory manager can handle it
+        if is_ara:
+            org_module.ara_lora_ref = weakref.ref(self)
         # check if parent has bias. if not force use_bias to False
         if org_module.bias is None:
             use_bias = False
@@ -193,6 +198,7 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
             is_assistant_adapter: bool = False,
             is_transformer: bool = False,
             base_model: 'StableDiffusion' = None,
+            is_ara: bool = False,
             **kwargs
     ) -> None:
         """
@@ -247,6 +253,7 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
         self.network_type = network_type
         self.is_assistant_adapter = is_assistant_adapter
         self.full_rank = network_type.lower() == "fullrank"
+        self.is_ara = is_ara
         if self.network_type.lower() == "dora":
             self.module_class = DoRAModule
             module_class = DoRAModule
@@ -258,11 +265,18 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
         self.peft_format = peft_format
         self.is_transformer = is_transformer
         
+        # use the old format for older models unless the user has specified otherwise
+        self.use_old_lokr_format = False
+        if self.network_config is not None and hasattr(self.network_config, 'old_lokr_format'):
+            self.use_old_lokr_format = self.network_config.old_lokr_format
+        # also allow a false from the model itself
+        if base_model is not None and not base_model.use_old_lokr_format:
+            self.use_old_lokr_format = False
 
         # always do peft for flux only for now
         if self.is_flux or self.is_v3 or self.is_lumina2 or is_transformer:
-            # don't do peft format for lokr
-            if self.network_type.lower() != "lokr":
+            # don't do peft format for lokr if using old format
+            if self.network_type.lower() != "lokr" or not self.use_old_lokr_format:
                 self.peft_format = True
 
         if self.peft_format:
@@ -419,6 +433,9 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                             
                             if self.network_type.lower() == "lokr":
                                 module_kwargs["factor"] = self.network_config.lokr_factor
+                            
+                            if self.is_ara:
+                                module_kwargs["is_ara"] = True
 
                             lora = module_class(
                                 lora_name,

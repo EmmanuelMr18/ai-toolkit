@@ -39,6 +39,16 @@ export interface GpuInfo {
   fan: GpuFan;
 }
 
+export interface CpuInfo {
+  name: string;
+  cores: number;
+  temperature: number;
+  totalMemory: number;
+  freeMemory: number;
+  availableMemory: number;
+  currentLoad: number;
+}
+
 export interface GPUApiResponse {
   hasNvidiaSmi: boolean;
   gpus: GpuInfo[];
@@ -86,9 +96,14 @@ export interface DatasetConfig {
   control_path?: string | null;
   num_frames: number;
   shrink_video_to_frames: boolean;
-  do_i2v: boolean;
+  do_i2v?: boolean;
+  do_audio?: boolean;
+  audio_normalize?: boolean;
+  audio_preserve_pitch?: boolean;
+  fps?: number;
   flip_x: boolean;
   flip_y: boolean;
+  num_repeats?: number;
   control_path_1?: string | null;
   control_path_2?: string | null;
   control_path_3?: string | null;
@@ -125,8 +140,12 @@ export interface TrainConfig {
   diff_output_preservation: boolean;
   diff_output_preservation_multiplier: number;
   diff_output_preservation_class: string;
+  blank_prompt_preservation?: boolean;
+  blank_prompt_preservation_multiplier?: number;
   switch_boundary_every: number;
   loss_type: 'mse' | 'mae' | 'wavelet' | 'stepped';
+  do_differential_guidance?: boolean;
+  differential_guidance_scale?: number;
 }
 
 export interface QuantizeKwargsConfig {
@@ -143,6 +162,10 @@ export interface ModelConfig {
   arch: string;
   low_vram: boolean;
   model_kwargs: { [key: string]: any };
+  layer_offloading?: boolean;
+  layer_offloading_transformer_percent?: number;
+  layer_offloading_text_encoder_percent?: number;
+  assistant_lora_path?: string;
 }
 
 export interface SampleItem {
@@ -179,6 +202,11 @@ export interface SampleConfig {
   fps: number;
 }
 
+export interface LoggingConfig {
+  log_every: number;
+  use_ui_logger: boolean;
+}
+
 export interface SliderConfig {
   guidance_strength?: number;
   anchor_strength?: number;
@@ -200,6 +228,7 @@ export interface ProcessConfig {
   save: SaveConfig;
   datasets: DatasetConfig[];
   train: TrainConfig;
+  logging: LoggingConfig;
   model: ModelConfig;
   sample: SampleConfig;
 }
@@ -221,7 +250,7 @@ export interface JobConfig {
 }
 
 export interface ConfigDoc {
-  title: string;
+  title: string | React.ReactNode;
   description: React.ReactNode;
 }
 
@@ -233,3 +262,5 @@ export interface GroupedSelectOption {
   readonly label: string;
   readonly options: SelectOption[];
 }
+
+export type JobStatus = 'queued' | 'running' | 'stopping' | 'stopped' | 'completed' | 'error';

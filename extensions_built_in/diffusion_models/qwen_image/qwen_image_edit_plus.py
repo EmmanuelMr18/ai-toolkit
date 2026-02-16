@@ -165,6 +165,12 @@ class QwenImageEditPlusModel(QwenImageModel):
         # todo handle not caching text encoder
         if self.pipeline.text_encoder.device != self.device_torch:
             self.pipeline.text_encoder.to(self.device_torch)
+            
+        if control_images is None:
+            raise ValueError("Missing control images for QwenImageEditPlusModel")
+        
+        if not isinstance(control_images, List):
+            control_images = [control_images]
 
         if control_images is not None and len(control_images) > 0:
             for i in range(len(control_images)):
@@ -200,6 +206,13 @@ class QwenImageEditPlusModel(QwenImageModel):
     ):
         with torch.no_grad():
             batch_size, num_channels_latents, height, width = latent_model_input.shape
+            if self.vae.device != self.device_torch:
+                self.vae.to(self.device_torch)
+            
+            control_image_res = VAE_IMAGE_SIZE
+            if self.model_config.model_kwargs.get("match_target_res", False):
+                # use the current target size to set the control image res
+                control_image_res = height * self.pipeline.vae_scale_factor * width * self.pipeline.vae_scale_factor
 
             # pack image tokens
             latent_model_input = latent_model_input.view(
@@ -224,14 +237,16 @@ class QwenImageEditPlusModel(QwenImageModel):
             # split the latents into batch items so we can concat the controls
             packed_latents_list = torch.chunk(latent_model_input, batch_size, dim=0)
             packed_latents_with_controls_list = []
+            
+            batch_control_tensor_list = batch.control_tensor_list
+            if batch_control_tensor_list is None and batch.control_tensor is not None:
+                batch_control_tensor_list = []
+                for b in range(batch_size):
+                    batch_control_tensor_list.append(batch.control_tensor[b : b + 1])
 
-            if batch.control_tensor_list is not None:
-                if len(batch.control_tensor_list) != batch_size:
-                    raise ValueError(
-                        "Control tensor list length does not match batch size"
-                    )
+            if batch_control_tensor_list is not None:
                 b = 0
-                for control_tensor_list in batch.control_tensor_list:
+                for control_tensor_list in batch_control_tensor_list:
                     # control tensor list is a list of tensors for this batch item
                     controls = []
                     # pack control
@@ -244,7 +259,7 @@ class QwenImageEditPlusModel(QwenImageModel):
                         if len(control_img.shape) == 3:
                             control_img = control_img.unsqueeze(0)
                         ratio = control_img.shape[2] / control_img.shape[3]
-                        c_width = math.sqrt(VAE_IMAGE_SIZE * ratio)
+                        c_width = math.sqrt(control_image_res * ratio)
                         c_height = c_width / ratio
 
                         c_width = round(c_width / 32) * 32

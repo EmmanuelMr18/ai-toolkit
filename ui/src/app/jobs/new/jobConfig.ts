@@ -14,9 +14,9 @@ export const defaultDatasetConfig: DatasetConfig = {
   controls: [],
   shrink_video_to_frames: true,
   num_frames: 1,
-  do_i2v: true,
   flip_x: false,
   flip_y: false,
+  num_repeats: 1,
 };
 
 export const defaultSliderConfig: SliderConfig = {
@@ -25,7 +25,7 @@ export const defaultSliderConfig: SliderConfig = {
   positive_prompt: 'person who is happy',
   negative_prompt: 'person who is sad',
   target_class: 'person',
-  anchor_class: "",
+  anchor_class: '',
 };
 
 export const defaultJobConfig: JobConfig = {
@@ -91,6 +91,10 @@ export const defaultJobConfig: JobConfig = {
           diff_output_preservation_class: 'person',
           switch_boundary_every: 1,
           loss_type: 'mse',
+        },
+        logging: {
+          log_every: 1,
+          use_ui_logger: true,
         },
         model: {
           name_or_path: 'ostris/Flex.1-alpha',
@@ -180,6 +184,20 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
   // upgrade job from ui_trainer to diffusion_trainer
   if (jobConfig?.config?.process && jobConfig.config.process[0]?.type === 'ui_trainer') {
     jobConfig.config.process[0].type = 'diffusion_trainer';
+  }
+
+  if ('auto_memory' in jobConfig.config.process[0].model) {
+    jobConfig.config.process[0].model.layer_offloading = (jobConfig.config.process[0].model.auto_memory ||
+      false) as boolean;
+    delete jobConfig.config.process[0].model.auto_memory;
+  }
+
+  if (!('logging' in jobConfig.config.process[0])) {
+    //@ts-ignore
+    jobConfig.config.process[0].logging = {
+      log_every: 1,
+      use_ui_logger: true,
+    };
   }
   return jobConfig;
 };

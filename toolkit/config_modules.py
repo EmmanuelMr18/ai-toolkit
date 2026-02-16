@@ -35,6 +35,7 @@ class LoggingConfig:
         self.log_every: int = kwargs.get('log_every', 100)
         self.verbose: bool = kwargs.get('verbose', False)
         self.use_wandb: bool = kwargs.get('use_wandb', False)
+        self.use_ui_logger: bool = kwargs.get('use_ui_logger', False)
         self.project_name: str = kwargs.get('project_name', 'ai-toolkit')
         self.run_name: str = kwargs.get('run_name', None)
 
@@ -206,8 +207,17 @@ class NetworkConfig:
         # -1 automatically finds the largest factor
         self.lokr_factor = kwargs.get('lokr_factor', -1)
         
+        # Use the old lokr format
+        self.old_lokr_format = kwargs.get('old_lokr_format', False)
+        
         # for multi stage models
         self.split_multistage_loras = kwargs.get('split_multistage_loras', True)
+        
+        # ramtorch, doesn't work yet
+        self.layer_offloading = kwargs.get('layer_offloading', False)
+        
+        # start from a pretrained lora
+        self.pretrained_lora_path = kwargs.get('pretrained_lora_path', None)
 
 
 AdapterTypes = Literal['t2i', 'ip', 'ip+', 'clip', 'ilora', 'photo_maker', 'control_net', 'control_lora', 'i2v']
@@ -387,6 +397,8 @@ class TrainConfig:
         self.noise_multiplier = kwargs.get('noise_multiplier', 1.0)
         self.target_noise_multiplier = kwargs.get('target_noise_multiplier', 1.0)
         self.random_noise_multiplier = kwargs.get('random_noise_multiplier', 0.0)
+        self.do_signal_correction_noise = kwargs.get('do_signal_correction_noise', False)
+        self.signal_correction_noise_scale = kwargs.get('signal_correction_noise_scale', 1.0)
         self.random_noise_shift = kwargs.get('random_noise_shift', 0.0)
         self.img_multiplier = kwargs.get('img_multiplier', 1.0)
         self.noisy_latent_multiplier = kwargs.get('noisy_latent_multiplier', 1.0)
@@ -448,7 +460,11 @@ class TrainConfig:
         self.diff_output_preservation_multiplier = kwargs.get('diff_output_preservation_multiplier', 1.0)
         # If the trigger word is in the prompt, we will use this class name to replace it eg. "sks woman" -> "woman"
         self.diff_output_preservation_class = kwargs.get('diff_output_preservation_class', '')
-
+        
+        # blank prompt preservation will preserve the model's knowledge of a blank prompt
+        self.blank_prompt_preservation = kwargs.get('blank_prompt_preservation', False)
+        self.blank_prompt_preservation_multiplier = kwargs.get('blank_prompt_preservation_multiplier', 1.0)
+        
         # legacy
         if match_adapter_assist and self.match_adapter_chance == 0.0:
             self.match_adapter_chance = 1.0
@@ -534,12 +550,19 @@ class TrainConfig:
         # contrastive loss
         self.do_guidance_loss = kwargs.get('do_guidance_loss', False)
         self.guidance_loss_target: Union[int, List[int, int]] = kwargs.get('guidance_loss_target', 3.0)
+        self.do_guidance_loss_cfg_zero: bool = kwargs.get('do_guidance_loss_cfg_zero', False)
         self.unconditional_prompt: str = kwargs.get('unconditional_prompt', '')
         if isinstance(self.guidance_loss_target, tuple):
             self.guidance_loss_target = list(self.guidance_loss_target)
-        
+
+        self.do_differential_guidance = kwargs.get('do_differential_guidance', False)
+        self.differential_guidance_scale = kwargs.get('differential_guidance_scale', 3.0)
+
         # for multi stage models, how often to switch the boundary
         self.switch_boundary_every: int = kwargs.get('switch_boundary_every', 1)
+
+        # stabilizes empty prompts to be zeroed predictions
+        self.do_blank_stabilization = kwargs.get('do_blank_stabilization', False)
 
 
 ModelArch = Literal['sd1', 'sd2', 'sd3', 'sdxl', 'pixart', 'pixart_sigma', 'auraflow', 'flux', 'flex1', 'flex2', 'lumina2', 'vega', 'ssd', 'wan21']
@@ -624,6 +647,21 @@ class ModelConfig:
         
         self.arch: ModelArch = kwargs.get("arch", None)
         
+        # auto memory management, only for some models
+        self.auto_memory = kwargs.get("auto_memory", False)
+        # auto memory is deprecated, use layer offloading instead
+        if self.auto_memory:
+            print("auto_memory is deprecated, use layer_offloading instead")
+        self.layer_offloading = kwargs.get("layer_offloading", self.auto_memory )
+        if self.layer_offloading and self.qtype == "qfloat8":
+            self.qtype = "float8"
+        if self.layer_offloading and self.qtype_te == "qfloat8":
+            self.qtype_te = "float8"
+        
+        # 0 is off and 1.0 is 100% of the layers
+        self.layer_offloading_transformer_percent = kwargs.get("layer_offloading_transformer_percent", 1.0)
+        self.layer_offloading_text_encoder_percent = kwargs.get("layer_offloading_text_encoder_percent", 1.0)
+
         # can be used to load the extras like text encoder or vae from here
         # only setup for some models but will prevent having to download the te for
         # 20 different model variants
@@ -642,6 +680,9 @@ class ModelConfig:
         # kwargs to pass to the model
         self.model_kwargs = kwargs.get("model_kwargs", {})
         
+        # model paths for models that support it
+        self.model_paths = kwargs.get("model_paths", {})
+        
         # allow frontend to pass arch with a color like arch:tag
         # but remove the tag
         if self.arch is not None:
@@ -650,6 +691,7 @@ class ModelConfig:
         
         if self.arch == "flex1":
             self.arch = "flux"
+            
         
         # handle migrating to new model arch
         if self.arch is not None:
@@ -925,7 +967,7 @@ class DatasetConfig:
         # it will select a random start frame and pull the frames at the given fps
         # this could have various issues with shorter videos and videos with variable fps
         # I recommend trimming your videos to the desired length and using shrink_video_to_frames(default)
-        self.fps: int = kwargs.get('fps', 16)
+        self.fps: int = kwargs.get('fps', 24)
         
         # debug the frame count and frame selection. You dont need this. It is for debugging.
         self.debug: bool = kwargs.get('debug', False)
@@ -941,6 +983,9 @@ class DatasetConfig:
         self.fast_image_size: bool = kwargs.get('fast_image_size', False)
         
         self.do_i2v: bool = kwargs.get('do_i2v', True)  # do image to video on models that are both t2i and i2v capable
+        self.do_audio: bool = kwargs.get('do_audio', False) # load audio from video files for models that support it
+        self.audio_preserve_pitch: bool = kwargs.get('audio_preserve_pitch', False) # preserve pitch when stretching audio to fit num_frames
+        self.audio_normalize: bool = kwargs.get('audio_normalize', False) # normalize audio volume levels when loading
 
 
 def preprocess_dataset_raw_config(raw_config: List[dict]) -> List[dict]:
@@ -1281,6 +1326,11 @@ def validate_configs(
     if train_config.bypass_guidance_embedding and train_config.do_guidance_loss:
         raise ValueError("Cannot bypass guidance embedding and do guidance loss at the same time. "
                          "Please set bypass_guidance_embedding to False or do_guidance_loss to False.")
+        
+    if model_config.accuracy_recovery_adapter is not None:
+        if model_config.assistant_lora_path is not None:
+            raise ValueError("Cannot use accuracy recovery adapter and assistant lora at the same time. "
+                             "Please set one of them to None.")
 
     # see if any datasets are caching text embeddings
     is_caching_text_embeddings = any(dataset.cache_text_embeddings for dataset in dataset_configs)
@@ -1299,5 +1349,8 @@ def validate_configs(
     if model_config.arch == 'qwen_image_edit':
         if train_config.unload_text_encoder:
             raise ValueError("Cannot cache unload text encoder with qwen_image_edit model. Control images are encoded with text embeddings. You can cache the text embeddings though")
+    
+    if train_config.diff_output_preservation and train_config.blank_prompt_preservation:
+        raise ValueError("Cannot use both differential output preservation and blank prompt preservation at the same time. Please set one of them to False.")
 
     

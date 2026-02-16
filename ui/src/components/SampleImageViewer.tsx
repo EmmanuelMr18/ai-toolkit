@@ -7,6 +7,7 @@ import { Cog } from 'lucide-react';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import { openConfirm } from './ConfirmModal';
 import { apiClient } from '@/utils/api';
+import { isVideo } from '@/utils/basic';
 
 interface Props {
   imgPath: string | null; // current image path
@@ -46,10 +47,21 @@ export default function SampleImageViewer({
   const onCancel = useCallback(() => setIsOpen(false), []);
 
   const imgInfo = useMemo(() => {
+    // handle windows C:\\Apps\\AI-Toolkit\\AI-Toolkit\\output\\LoRA-Name\\samples\\1763563000704__000004000_0.jpg
     const ii = { filename: '', step: 0, promptIdx: 0 };
     if (imgPath) {
-      const filename = imgPath.split('/').pop();
-      if (!filename) return ii;
+      // handle windows
+      let filename: string | null = null;
+      if (imgPath.includes('\\')) {
+        const parts = imgPath.split('\\');
+        filename = parts[parts.length - 1];
+      } else {
+        filename = imgPath.split('/').pop() || null;
+      }
+      if (!filename) {
+        console.error('Filename could not be determined from imgPath:', imgPath);
+        return ii;
+      }
       ii.filename = filename;
       const parts = filename
         .split('.')[0]
@@ -58,6 +70,8 @@ export default function SampleImageViewer({
       if (parts.length === 3) {
         ii.step = parseInt(parts[1]);
         ii.promptIdx = parseInt(parts[2]);
+      } else {
+        console.error('Unexpected filename format for sample image:', filename);
       }
     }
     return ii;
@@ -187,13 +201,24 @@ export default function SampleImageViewer({
             className="relative transform rounded-lg bg-gray-800 text-left shadow-xl transition-all data-closed:translate-y-4 data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in max-w-[95%] max-h-[95vh] data-closed:sm:translate-y-0 data-closed:sm:scale-95 flex flex-col overflow-hidden"
           >
             <div className="overflow-hidden flex items-center justify-center">
-              {imgPath && (
-                <img
-                  src={`/api/img/${encodeURIComponent(imgPath)}`}
-                  alt="Sample Image"
-                  className="w-auto h-auto max-w-[95vw] max-h-[82vh] object-contain"
-                />
-              )}
+              {imgPath &&
+                (isVideo(imgPath) ? (
+                  <video
+                    src={`/api/img/${encodeURIComponent(imgPath)}`}
+                    className="w-auto h-auto max-w-[95vw] max-h-[82vh] object-contain"
+                    preload="none"
+                    playsInline
+                    loop
+                    autoPlay
+                    controls={true}
+                  />
+                ) : (
+                  <img
+                    src={`/api/img/${encodeURIComponent(imgPath)}`}
+                    alt="Sample Image"
+                    className="w-auto h-auto max-w-[95vw] max-h-[82vh] object-contain"
+                  />
+                ))}
             </div>
             {/* # make full width */}
             <div className="bg-gray-950 text-sm flex justify-between items-center px-4 py-2">

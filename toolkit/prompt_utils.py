@@ -72,7 +72,10 @@ class PromptEmbeds:
         if self.pooled_embeds is not None:
             prompt_embeds = PromptEmbeds([cloned_text_embeds, self.pooled_embeds.clone()])
         else:
-            prompt_embeds = PromptEmbeds(cloned_text_embeds)
+            if isinstance(cloned_text_embeds, list) or isinstance(cloned_text_embeds, tuple):
+                prompt_embeds = PromptEmbeds([cloned_text_embeds, None])
+            else:
+                prompt_embeds = PromptEmbeds(cloned_text_embeds)
 
         if self.attention_mask is not None:
             if isinstance(self.attention_mask, list) or isinstance(self.attention_mask, tuple):
@@ -84,7 +87,10 @@ class PromptEmbeds:
     def expand_to_batch(self, batch_size):
         pe = self.clone()
         if isinstance(pe.text_embeds, list) or isinstance(pe.text_embeds, tuple):
-            current_batch_size = pe.text_embeds[0].shape[0]
+            if len(pe.text_embeds[0].shape) == 2:
+                current_batch_size = len(pe.text_embeds)
+            else:
+                current_batch_size = pe.text_embeds[0].shape[0]
         else:
             current_batch_size = pe.text_embeds.shape[0]
         if current_batch_size == batch_size:
@@ -92,7 +98,11 @@ class PromptEmbeds:
         if current_batch_size != 1:
             raise Exception("Can only expand batch size for batch size 1")
         if isinstance(pe.text_embeds, list) or isinstance(pe.text_embeds, tuple):
-            pe.text_embeds = [t.expand(batch_size, -1) for t in pe.text_embeds]
+            if len(pe.text_embeds[0].shape) == 2:
+                # batch is a list of tensors
+                pe.text_embeds = pe.text_embeds * batch_size
+            else:
+                pe.text_embeds = [t.expand(batch_size, -1) for t in pe.text_embeds]
         else:
             pe.text_embeds = pe.text_embeds.expand(batch_size, -1)
         if pe.pooled_embeds is not None:
@@ -139,8 +149,10 @@ class PromptEmbeds:
         text_embeds = []
         pooled_embeds = None
         attention_mask = []
+        is_list = False
         for key in sorted(state_dict.keys()):
             if key.startswith("text_embed_"):
+                is_list = True
                 text_embeds.append(state_dict[key])
             elif key == "text_embed":
                 text_embeds.append(state_dict[key])
@@ -152,7 +164,7 @@ class PromptEmbeds:
                 attention_mask.append(state_dict[key])
         pe = cls(None)
         pe.text_embeds = text_embeds
-        if len(text_embeds) == 1:
+        if len(text_embeds) == 1 and not is_list:
             pe.text_embeds = text_embeds[0]
         if pooled_embeds is not None:
             pe.pooled_embeds = pooled_embeds
@@ -232,7 +244,7 @@ class EncodedPromptPair:
         return self
 
 
-def concat_prompt_embeds(prompt_embeds: list["PromptEmbeds"]):
+def concat_prompt_embeds(prompt_embeds: list["PromptEmbeds"], padding_side: str = "right") -> PromptEmbeds:
     # --- pad text_embeds ---
     if isinstance(prompt_embeds[0].text_embeds, (list, tuple)):
         embed_list = []
@@ -247,7 +259,10 @@ def concat_prompt_embeds(prompt_embeds: list["PromptEmbeds"]):
                         dtype=t.dtype,
                         device=t.device,
                     )
-                    t = torch.cat([t, pad], dim=1)
+                    if padding_side == "right":
+                        t = torch.cat([t, pad], dim=1)
+                    else:
+                        t = torch.cat([pad, t], dim=1)
                 padded.append(t)
             embed_list.append(torch.cat(padded, dim=0))
         text_embeds = embed_list
@@ -262,7 +277,10 @@ def concat_prompt_embeds(prompt_embeds: list["PromptEmbeds"]):
                     dtype=t.dtype,
                     device=t.device,
                 )
-                t = torch.cat([t, pad], dim=1)
+                if padding_side == "right":
+                    t = torch.cat([t, pad], dim=1)
+                else:
+                    t = torch.cat([pad, t], dim=1)
             padded.append(t)
         text_embeds = torch.cat(padded, dim=0)
 
@@ -284,7 +302,10 @@ def concat_prompt_embeds(prompt_embeds: list["PromptEmbeds"]):
                     dtype=m.dtype,
                     device=m.device,
                 )
-                m = torch.cat([m, pad], dim=1)
+                if padding_side == "right":
+                    m = torch.cat([m, pad], dim=1)
+                else:
+                    m = torch.cat([pad, m], dim=1)
             padded.append(m)
         attention_mask = torch.cat(padded, dim=0)
 

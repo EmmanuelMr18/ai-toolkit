@@ -21,6 +21,7 @@ import torch
 import torch.backends.cuda
 from huggingface_hub import HfApi, Repository, interpreter_login
 from huggingface_hub.utils import HfFolder
+from toolkit.memory_management import MemoryManager
 
 from toolkit.basic import value_map
 from toolkit.clip_vision_adapter import ClipVisionAdapter
@@ -126,7 +127,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             self.has_first_sample_requested = False
             self.first_sample_config = self.sample_config
         self.logging_config = LoggingConfig(**self.get_conf('logging', {}))
-        self.logger = create_logger(self.logging_config, config)
+        self.logger = create_logger(self.logging_config, config, self.save_root)
         self.optimizer: torch.optim.Optimizer = None
         self.lr_scheduler = None
         self.data_loader: Union[DataLoader, None] = None
@@ -815,11 +816,23 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                 if len(paths) > 0:
                     latest_path = max(paths, key=os.path.getctime)
+        
+        if latest_path is None and self.network_config is not None and self.network_config.pretrained_lora_path is not None:
+            # set pretrained lora path as load path if we do not have a checkpoint to resume from
+            if os.path.exists(self.network_config.pretrained_lora_path):
+                latest_path = self.network_config.pretrained_lora_path
+                print_acc(f"Using pretrained lora path from config: {latest_path}")
+            else:
+                # no pretrained lora found
+                print_acc(f"Pretrained lora path from config does not exist: {self.network_config.pretrained_lora_path}")
 
         return latest_path
 
     def load_training_state_from_metadata(self, path):
         if not self.accelerator.is_main_process:
+            return
+        if path is not None and self.network_config is not None and path == self.network_config.pretrained_lora_path:
+            # dont load metadata from pretrained lora
             return
         meta = None
         # if path is folder, then it is diffusers
@@ -1291,28 +1304,33 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     # if we have a 5d tensor, then we need to do it on a per batch item, per channel basis, per frame
                     s = (noise.shape[0], noise.shape[1], noise.shape[2], 1, 1)
                 
-                if self.train_config.random_noise_multiplier > 0.0:
-                    
-                    # do it on a per batch item, per channel basis
-                    noise_multiplier = 1 + torch.randn(
-                        s,
-                        device=noise.device,
-                        dtype=noise.dtype
-                    ) * self.train_config.random_noise_multiplier
-                
-            with self.timer('make_noisy_latents'):
-
                 noise = noise * noise_multiplier
+                
+                if self.train_config.do_signal_correction_noise:
+                    batch_noise = latents.clone().to(noise.device, dtype=noise.dtype)
+                    scn_scale = torch.randn(
+                        batch_noise.shape[0], batch_noise.shape[1], 1, 1,
+                        device=batch_noise.device, 
+                        dtype=batch_noise.dtype
+                    ) * self.train_config.signal_correction_noise_scale
+                    batch_noise = batch_noise * scn_scale
+                    noise = noise + batch_noise 
                 
                 if self.train_config.random_noise_shift > 0.0:
                     # get random noise -1 to 1
                     noise_shift = torch.randn(
-                        s,  
+                        batch_size, latents.shape[1], 1, 1,
                         device=noise.device,
                         dtype=noise.dtype
                     ) * self.train_config.random_noise_shift
                     # add to noise
                     noise += noise_shift
+                
+                if self.train_config.random_noise_multiplier > 0.0:
+                    sigma = self.train_config.random_noise_multiplier
+                    noise_multiplier = torch.exp(torch.randn(s, device=noise.device, dtype=noise.dtype) * sigma)
+                
+            with self.timer('make_noisy_latents'):
 
                 latent_multiplier = self.train_config.latent_multiplier
 
@@ -1323,6 +1341,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     latent_multiplier = normalizer
 
                 latents = latents * latent_multiplier
+                
+                if self.train_config.do_blank_stabilization:
+                    # zero out latents with blank prompts
+                    blank_latent = torch.zeros_like(latents)
+                    for i, prompt in enumerate(conditioned_prompts):
+                        if prompt.strip() == '':
+                            latents[i] = blank_latent[i]
+                
                 batch.latents = latents
 
                 # normalize latents to a mean of 0 and an std of 1
@@ -1759,7 +1785,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 )
 
                 # we cannot merge in if quantized
-                if self.model_config.quantize:
+                if self.model_config.quantize or self.model_config.layer_offloading:
                     # todo find a way around this
                     self.network.can_merge_in = False
 
@@ -1811,6 +1837,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     print_acc(f"Loading from {latest_save_path}")
                     extra_weights = self.load_weights(latest_save_path)
                     self.network.multiplier = 1.0
+                
+                if self.network_config.layer_offloading:
+                    MemoryManager.attach(
+                        self.network,
+                        self.device_torch
+                    )
 
             if self.embed_config is not None:
                 # we are doing embedding training as well
@@ -2149,6 +2181,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             if self.torch_profiler is not None:
                 self.torch_profiler.start()
             did_oom = False
+            loss_dict = None
             try:
                 with self.accelerator.accumulate(self.modules_being_trained):
                     loss_dict = self.hook_train_loop(batch_list)
@@ -2172,7 +2205,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 print_acc(f"# OOM during training step, skipping batch {self.num_consecutive_oom}/3 #")
                 print_acc("################################################")
                 print_acc("")
-            self.num_consecutive_oom = 0
+            else:
+                self.num_consecutive_oom = 0
             if self.torch_profiler is not None:
                 torch.cuda.synchronize()  # Make sure all CUDA ops are done
                 self.torch_profiler.stop()
@@ -2191,25 +2225,27 @@ class BaseSDTrainProcess(BaseTrainProcess):
             with torch.no_grad():
                 # torch.cuda.empty_cache()
                 # if optimizer has get_lrs method, then use it
-                if hasattr(optimizer, 'get_avg_learning_rate'):
-                    learning_rate = optimizer.get_avg_learning_rate()
-                elif hasattr(optimizer, 'get_learning_rates'):
-                    learning_rate = optimizer.get_learning_rates()[0]
-                elif self.train_config.optimizer.lower().startswith('dadaptation') or \
-                        self.train_config.optimizer.lower().startswith('prodigy'):
-                    learning_rate = (
-                            optimizer.param_groups[0]["d"] *
-                            optimizer.param_groups[0]["lr"]
-                    )
-                else:
-                    learning_rate = optimizer.param_groups[0]['lr']
+                learning_rate = 0.0
+                if not did_oom and loss_dict is not None:
+                    if hasattr(optimizer, 'get_avg_learning_rate'):
+                        learning_rate = optimizer.get_avg_learning_rate()
+                    elif hasattr(optimizer, 'get_learning_rates'):
+                        learning_rate = optimizer.get_learning_rates()[0]
+                    elif self.train_config.optimizer.lower().startswith('dadaptation') or \
+                            self.train_config.optimizer.lower().startswith('prodigy'):
+                        learning_rate = (
+                                optimizer.param_groups[0]["d"] *
+                                optimizer.param_groups[0]["lr"]
+                        )
+                    else:
+                        learning_rate = optimizer.param_groups[0]['lr']
 
-                prog_bar_string = f"lr: {learning_rate:.1e}"
-                for key, value in loss_dict.items():
-                    prog_bar_string += f" {key}: {value:.3e}"
+                    prog_bar_string = f"lr: {learning_rate:.1e}"
+                    for key, value in loss_dict.items():
+                        prog_bar_string += f" {key}: {value:.3e}"
 
-                if self.progress_bar is not None:
-                    self.progress_bar.set_postfix_str(prog_bar_string)
+                    if self.progress_bar is not None:
+                        self.progress_bar.set_postfix_str(prog_bar_string)
 
                 # if the batch is a DataLoaderBatchDTO, then we need to clean it up
                 if isinstance(batch, DataLoaderBatchDTO):
@@ -2260,9 +2296,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             # log to tensorboard
                             if self.accelerator.is_main_process:
                                 if self.writer is not None:
-                                    for key, value in loss_dict.items():
-                                        self.writer.add_scalar(f"{key}", value, self.step_num)
-                                    self.writer.add_scalar(f"lr", learning_rate, self.step_num)
+                                    if loss_dict is not None:
+                                        for key, value in loss_dict.items():
+                                            self.writer.add_scalar(f"{key}", value, self.step_num)
+                                        self.writer.add_scalar(f"lr", learning_rate, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
                         
@@ -2271,10 +2308,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             self.logger.log({
                                 'learning_rate': learning_rate,
                             })
-                            for key, value in loss_dict.items():
-                                self.logger.log({
-                                    f'loss/{key}': value,
-                                })
+                            if loss_dict is not None:
+                                for key, value in loss_dict.items():
+                                    self.logger.log({
+                                        f'loss/{key}': value,
+                                    })
                     elif self.logging_config.log_every is None:
                         if self.accelerator.is_main_process:
                             # log every step
@@ -2298,7 +2336,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 
                 # commit log
                 if self.accelerator.is_main_process:
-                    self.logger.commit(step=self.step_num)
+                    with self.timer('commit_logger'):
+                        self.logger.commit(step=self.step_num)
 
                 # sets progress bar to match out step
                 if self.progress_bar is not None:
