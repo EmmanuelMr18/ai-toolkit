@@ -40,43 +40,53 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11")
     # install required system and pip packages, more about this modal approach: https://modal.com/docs/examples/dreambooth_app
-    .apt_install("libgl1", "libglib2.0-0")
+    .apt_install("libgl1", "libglib2.0-0", "git")
     .pip_install("cupy-cuda12x")
     .pip_install(
-        "python-dotenv",
-        "torch", 
-        "diffusers[torch]", 
-        "transformers", 
-        "ftfy", 
-        "torchvision", 
-        "oyaml", 
-        "opencv-python", 
-        "albumentations",
+        "torch",
+        "torchaudio",
+        "torchvision",
+        "torchao==0.10.0",
         "safetensors",
+        "git+https://github.com/huggingface/diffusers@8600b4c10d67b0ce200f664204358747bd53c775",
+        "transformers==4.57.3",
         "lycoris-lora==1.8.3",
         "flatten_json",
         "pyyaml",
-        "tensorboard", 
-        "kornia", 
-        "invisible-watermark", 
-        "einops", 
-        "accelerate", 
-        "toml", 
+        "oyaml",
+        "tensorboard",
+        "kornia",
+        "invisible-watermark",
+        "einops",
+        "accelerate",
+        "toml",
+        "albumentations==1.4.15",
+        "albucore==0.0.16",
         "pydantic",
         "omegaconf",
         "k-diffusion",
         "open_clip_torch",
         "timm",
         "prodigyopt",
-        "controlnet_aux==0.0.7",
+        "controlnet_aux==0.0.10",
+        "python-dotenv",
         "bitsandbytes",
         "hf_transfer",
-        "lpips", 
-        "pytorch_fid", 
-        "optimum-quanto", 
-        "sentencepiece", 
-        "huggingface_hub", 
-        "peft"
+        "lpips",
+        "pytorch_fid",
+        "optimum-quanto==0.2.4",
+        "sentencepiece",
+        "huggingface_hub",
+        "peft",
+        "gradio",
+        "python-slugify",
+        "opencv-python",
+        "pytorch-wavelets==1.3.0",
+        "matplotlib==3.10.1",
+        "setuptools==69.5.1",
+        "scipy==1.12.0",
+        "av==16.0.1",
+        "torchcodec",
     )
     # mount for the entire ai-toolkit directory
     # dynamically use the current directory where this script is located
@@ -86,7 +96,18 @@ image = (
 
 
 # create the Modal app with the necessary mounts and volumes
-app = modal.App(name="ostris-ai-toolkit", image=image, volumes={MODELS_MOUNT_DIR: model_volume, TRAIN_MOUNT_DIR: trainings_volume})
+app = modal.App(
+    name="ostris-ai-toolkit", 
+    image=image, 
+    volumes={
+        MODELS_MOUNT_DIR: model_volume, 
+        TRAIN_MOUNT_DIR: trainings_volume,
+        "/cache": modal.Volume.from_name(f"hf-hub-cache", create_if_missing=True),
+    },
+    secrets=[
+        modal.Secret.from_name("huggingface-secret"),
+    ],
+    )
 
 # Check if we have DEBUG_TOOLKIT in env
 if os.environ.get("DEBUG_TOOLKIT", "0") == "1":
@@ -114,9 +135,9 @@ def print_end_message(jobs_completed, jobs_failed):
 @app.function(
     # request a GPU with at least 24GB VRAM
     # more about modal GPU's: https://modal.com/docs/guide/gpu
-    gpu="H100", # gpu="H100"
+    gpu="B200", # gpu="H100"
     # more about modal timeouts: https://modal.com/docs/guide/timeouts
-    timeout=7200,  # 2 hours, increase or decrease if needed
+    timeout=18000,  # 5 hours, increase or decrease if needed
 )
 def main(config_id_list_str: str, recover: bool = False, name: str = None):
     # convert the config file list from a string to a list
